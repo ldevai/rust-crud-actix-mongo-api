@@ -1,0 +1,69 @@
+version: "3.8"
+
+services:
+  app:
+    container_name: demo-api
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - 8000:8000
+    restart: always
+    networks:
+      - prod
+    environment:
+      COMPOSE_CONVERT_WINDOWS_PATHS: 1
+      APP_ENV: prod
+    volumes:
+      - ./data/logs:/logs:rw
+
+  app-dev:
+    container_name: demo-api-dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - 8001:8001
+    networks:
+      - dev
+    restart: always
+    environment:
+      COMPOSE_CONVERT_WINDOWS_PATHS: 1
+      APP_ENV: dev
+    volumes:
+      - ./data/logs:/logs:rw
+
+  db:
+    container_name: demo-db
+    image: mongo:latest
+    ports:
+      - 27017:27017
+    volumes:
+      - ./data/db:/data/db
+    networks:
+      - dev
+      - prod
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: demo
+      MONGO_INITDB_ROOT_PASSWORD: demo
+    restart: always
+
+  web:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    container_name: demo-web
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - ./docker:/data
+      - ./data/nginx/logs:/data/logs
+
+networks:
+  demo.com:
+    name: demo.com
+  dev:
+    name: dev
+  prod:
+    name: prod

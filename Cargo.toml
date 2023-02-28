@@ -1,0 +1,23 @@
+[package]
+name = "demo-api"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+actix = "0.13.0"
+actix-rt = "2.8.0"
+actix-web = "4.3.1"
+actix-web-grants = "3.0.1"
+mongodb = { version = "2.1.0", default-features = false, features = ["sync"] }
+bson = "2.1.0"
+dotenv = "0.15.0"
+log4rs = "1.2.0"
+log = "0.4.17"
+bcrypt = "0.14.0"
+chrono = { version = "0.4.23", features = ["serde"] }
+jsonwebtoken = "8.2.0"
+derive_more = "0.99.17"
+serde = "1.0.136"
+serde_json = "1.0.93"
