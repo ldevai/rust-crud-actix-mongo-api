@@ -1,85 +1,75 @@
-use std::fmt;
-
-use actix_web::{FromRequest, HttpMessage, HttpRequest};
-use actix_web::dev::Payload;
-use bson::oid::ObjectId;
-use chrono::{DateTime, Utc};
+use mongodb::bson::DateTime;
+use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct User {
-    #[serde(rename = "_id")]
-    pub id: Option<ObjectId>,
-    pub email: String,
-    pub username: String,
-    pub password: String,
-    pub roles: Vec<Role>,
-    pub tokens: Option<Tokens>,
-    pub created_at: Option<DateTime<Utc>>,
-    pub updated_at: Option<DateTime<Utc>>,
-}
+use crate::errors::ApiError;
 
-// Retrieves user object from session previously set by the jwt middleware to be available for injection on controllers
-impl FromRequest for User {
-    type Error = actix_web::Error;
-    type Future = std::future::Ready<Result<User, Self::Error>>;
-
-    fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
-        let default_user = User {
-            id: None,
-            email: "".to_string(),
-            username: "".to_string(),
-            password: "".to_string(),
-            roles: vec![],
-            tokens: None,
-            created_at: None,
-            updated_at: None,
-        };
-
-        let user: User = match req.extensions_mut().get::<User>() {
-            Some(data) => data.to_owned(),
-            None => default_user.clone()
-        };
-
-        return std::future::ready(Ok(user));
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Tokens {
-    pub access_token: Option<String>,
-    pub refresh_token: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct UserView {
-    pub email: String,
-    pub username: String,
-    pub roles: Vec<Role>,
-    pub created_at: Option<DateTime<Utc>>,
-    pub updated_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct CreateUser {
-    pub email: String,
-    pub username: String,
-    pub password: String,
-    pub roles: Vec<Role>,
-}
-
-
-#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Role {
     User,
     Admin,
 }
 
-impl fmt::Display for Role {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Role::User => write!(f, "User"),
-            Role::Admin => write!(f, "Admin"),
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct User {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    pub email: String,
+    pub username: String,
+    pub password_hash: String,
+    pub roles: Vec<Role>,
+    pub session_id: Option<String>,
+    pub created_at: DateTime,
+    pub updated_at: DateTime,
+}
+
+impl User {
+    pub fn view(&self) -> UserView {
+        UserView {
+            id: self.id.to_hex(),
+            email: self.email.clone(),
+            username: self.username.clone(),
+            roles: self.roles.clone(),
+            created_at: self.created_at.try_to_rfc3339_string().unwrap_or_default(),
+        }
+    }
+}
+
+/// What the API returns for a user: never the password hash or session.
+#[derive(Serialize)]
+pub struct UserView {
+    pub id: String,
+    pub email: String,
+    pub username: String,
+    pub roles: Vec<Role>,
+    pub created_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct CreateUser {
+    pub email: String,
+    pub username: String,
+    pub password: String,
+}
+
+impl CreateUser {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        let username_ok = (3..=32).contains(&self.username.len())
+            && self
+                .username
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c));
+        if !self.email.contains('@') || self.email.len() > 254 {
+            Err(ApiError::bad_request("a valid email is required"))
+        } else if !username_ok {
+            Err(ApiError::bad_request(
+                "username must be 3-32 characters: letters, digits, _ . -",
+            ))
+        } else if !(8..=72).contains(&self.password.len()) {
+            // bcrypt only uses the first 72 bytes of a password.
+            Err(ApiError::bad_request("password must be 8-72 characters"))
+        } else {
+            Ok(())
         }
     }
 }

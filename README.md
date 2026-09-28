@@ -1,89 +1,85 @@
 # rust-crud-actix-mongo-api
-# Rust Crud using Actix Web (v4.3) and MongoDB with JWT authentication
 
-### Features of this demo
-* Public and Private REST endpoints
-* JWT token parsing from either cookie or **Authorization: Bearer** header
-* Current user object injection in session
-* MongoDB pool build and basic operations
-* App shared Services and DB pool
-* Encrypted password hashes comparison
-* Read environment variables from .env
+A JWT-secured REST API in Rust with actix-web 4 and MongoDB: bcrypt passwords,
+access + refresh tokens read from an HttpOnly cookie or an `Authorization: Bearer`
+header, a `CurrentUser` extractor, and role checks (`User` / `Admin`) on protected routes.
 
-<br />
+> Maintained in [devai-io/devai_boilerplates](https://github.com/devai-io/devai_boilerplates/tree/main/rust-crud-actix-mongo-api),
+> the public home of every [devai.io](https://devai.io) project; this repo carries the same code.
 
-### Main Dependencies
-* actix-web (4.3)
-* jsonwebtoken
-* mongodb
-* dotenv
+## Run
 
-This boilerplate application offers the following endpoints, with JWT role-based validation demo:
+    git clone https://github.com/ldevai/rust-crud-actix-mongo-api.git
+    cd rust-crud-actix-mongo-api
+    docker compose up --build
 
-| Path                     | Method |
-|--------------------------|--------|
-| /api/auth/login          | POST   |
-| /api/auth/refresh        | POST   |
-| /api/auth/validate       | GET    |
-| /api/protected/admin     | GET    |
-| /api/protected/user      | GET    |
-| /api/public              | GET    |
-| /api/user/create         | POST   |
-| /api/user/get/{username} | GET    |
+The API answers on http://localhost:8080 (`curl localhost:8080/health` → `ok`).
+MongoDB keeps its state in `./data/mongo`; the unique indexes on `users.email` and
+`users.username` are ensured on every start.
 
-The **.env** file contains the mongodb connection details.
+Without Docker: run a MongoDB, export the variables from `.env.example`, then
+`cargo run` (Rust 1.98, the toolchain the Dockerfile pins).
 
-<br />
+## How it works
 
+| Method | Path                    | Auth       | Result                                                           |
+|--------|-------------------------|------------|------------------------------------------------------------------|
+| GET    | `/health`               | —          | `200 ok`                                                         |
+| POST   | `/api/user/create`      | —          | `{email, username, password}` → `201` user, `409` if taken       |
+| POST   | `/api/auth/login`       | —          | `{email, password}` → `200 {email, username, roles, tokens}` + `token` cookie, `401` if wrong |
+| POST   | `/api/auth/refresh`     | —          | `{refresh_token}` → `200` new token pair, `401` if used/revoked  |
+| GET    | `/api/auth/validate`    | any role   | `200` current user, `401` without a valid token                  |
+| GET    | `/api/user/{username}`  | any role   | `200` user — yourself, or anyone if you are `Admin` (`403` otherwise) |
+| GET    | `/api/public`           | optional   | `200 {username, endpoint_security}`, `username` is `null` when anonymous |
+| GET    | `/api/protected/user`   | any role   | `200`, or `401`                                                  |
+| GET    | `/api/protected/admin`  | `Admin`    | `200`, `401` without a token, `403` for a plain `User`           |
 
-## Development environment setup
+- **Tokens** — login returns an access token (15 min) and a refresh token (7 days),
+  both HS256 JWTs signed with `AUTH_SECRET`. Verification pins HS256 and requires
+  `exp`, so `alg: none` or re-signed tokens are rejected.
+- **Sessions** — each token carries the user's current `session_id`. Logging in again
+  or refreshing replaces it, which revokes every older token; a refresh token works once.
+- **`CurrentUser`** (`src/security.rs`) — an actix extractor: reads the Bearer header
+  or the `token` cookie, verifies the JWT, and loads the user from MongoDB. Put it in
+  a handler's arguments to require login, `Option<CurrentUser>` to make it optional,
+  and call `current_user.require(Role::Admin)?` for a role check.
+- **Passwords** — bcrypt (cost 12), hashed on actix's blocking pool so slow hashing
+  never stalls request handling.
+- **Roles** — sign-up always creates a `User`. Promote an admin on the database;
+  roles are read from MongoDB on every request, so it applies immediately:
 
-Requirements: rust toolchain, docker, docker-container
+      docker compose exec db mongosh demo --eval \
+        'db.users.updateOne({username: "admin"}, {$set: {roles: ["User", "Admin"]}})'
 
-Create and start a mongodb instance with docker:
+- **Errors** are always JSON: `{"error": "message"}`.
 
-    docker-compose up -d db
+Try it:
 
-<br />
+    curl -X POST localhost:8080/api/user/create -H 'content-type: application/json' \
+      -d '{"email":"user@test.com","username":"user","password":"supersecret"}'
+    TOKEN=$(curl -s localhost:8080/api/auth/login -H 'content-type: application/json' \
+      -d '{"email":"user@test.com","password":"supersecret"}' | jq -r .tokens.access_token)
+    curl -H "Authorization: Bearer $TOKEN" localhost:8080/api/protected/user    # 200
+    curl -H "Authorization: Bearer $TOKEN" localhost:8080/api/protected/admin   # 403
 
-## Running the Application
-Run the application with the command:
+## Layout
 
-    cargo run
+    src/main.rs             env, MongoDB connection, routes
+    src/security.rs         JWT keys, bcrypt, the CurrentUser extractor
+    src/auth/service.rs     login, refresh and token → user, with session rotation
+    src/users/service.rs    sign-up, lookup, unique indexes
+    src/test_controller.rs  the public / user / admin demo endpoints
+    src/errors.rs           ApiError → {"error": ...} responses
 
-Alternatively, you can run the command below to relaunch at any changes to the given resources:
+## Deploy
 
-    cargo watch -w src -w Cargo.toml -w .env -x run
+Fork this repo (or push a copy to your own GitHub repo) and the shipped workflow
+(`.github/workflows/ci.yml`) tests the compose stack, publishes the image to
+GHCR, and — once you set the `DEPLOY_HOST` / `DEPLOY_USER` variables and
+`DEPLOY_KEY` secret — deploys it to your server over ssh. Set a long random
+`AUTH_SECRET` on the server; the one in `compose.yaml` is for local use only.
 
-<br />
-
-## Testing
-
-#### Create users
-
-    curl -H 'Content-Type: application/json' -d '{"username":"admin","email":"admin@test.com","password":"abc123","roles":["Admin"]}' http://localhost:8000/api/user/create
-    curl -H 'Content-Type: application/json' -d '{"username":"user","email":"user@test.com","password":"abc123","roles":["User"]}' http://localhost:8000/api/user/create
-
-#### Login
-
-    curl -H 'Content-Type: application/json' -d '{"email":"user@test.com","password":"abc123"}' http://localhost:8000/api/auth/login
-
-If everything is working, and you are using Linux/MacOS/Cygwin or have access to a bash, the one-liner below can be useful to parse the token from the response:
-
-    # login as USER
-    TOKEN=$(curl -H 'Content-Type: application/json' -d '{"email":"user@test.com","password":"abc123"}' http://localhost:8000/api/auth/login | python -c 'import json,sys;print(json.load(sys.stdin)["tokens"]["access_token"])')
-    echo $TOKEN
-    
-    # these calls below should return a 200 (OK) status code 
-    curl -v -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/public
-    curl -v -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/protected/user
-    
-    # this call should return a 403 (FORBIDDEN) status code
-    curl -v -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/protected/admin
-
-    # login as ADMIN
-    TOKEN=$(curl -H 'Content-Type: application/json' -d '{"email":"admin@test.com","password":"abc123"}' http://localhost:8000/api/auth/login | python -c 'import json,sys;print(json.load(sys.stdin)["tokens"]["access_token"])')
-
-    # this call should return a 200 (OK) status code 
-    curl -v -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/protected/admin
-
+---
+Part of [devai.io](https://devai.io) — Rust API boilerplates, alongside
+[`rust-crud-sql-api`](https://github.com/devai-io/devai_boilerplates/tree/main/rust-crud-sql-api) and
+[`rust-crud-nosql-api`](https://github.com/devai-io/devai_boilerplates/tree/main/rust-crud-nosql-api).

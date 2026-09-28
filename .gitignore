@@ -1,3 +1,4 @@
-target
+data/
+target/
+.env
 .DS_Store
-data

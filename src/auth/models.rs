@@ -1,14 +1,19 @@
 use serde::{Deserialize, Serialize};
 
-use crate::users::models::{Role, Tokens};
+use crate::users::models::Role;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Deserialize)]
 pub struct AuthRequest {
     pub email: String,
     pub password: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Deserialize)]
+pub struct TokenRefreshRequest {
+    pub refresh_token: String,
+}
+
+#[derive(Serialize)]
 pub struct AuthResponse {
     pub email: String,
     pub username: String,
@@ -16,14 +21,8 @@ pub struct AuthResponse {
     pub tokens: Tokens,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-pub struct Claims {
-    pub sub: String,
-    pub role: String,
-    pub exp: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TokenRefreshRequest {
+#[derive(Serialize)]
+pub struct Tokens {
+    pub access_token: String,
     pub refresh_token: String,
 }

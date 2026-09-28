@@ -1,35 +1,44 @@
-use actix_web::{get, HttpResponse, post, Responder, web};
+use actix_web::cookie::time::Duration;
+use actix_web::cookie::{Cookie, SameSite};
+use actix_web::{HttpResponse, get, post, web};
 
-use crate::auth::models::{AuthRequest, TokenRefreshRequest};
-use crate::users::models::User;
+use crate::AppState;
+use crate::auth::models::{AuthRequest, AuthResponse, TokenRefreshRequest};
+use crate::errors::ApiError;
+use crate::security::{ACCESS_TOKEN_TTL, CurrentUser, TOKEN_COOKIE};
 
 #[post("/api/auth/login")]
-pub async fn login(app_data: web::Data<crate::AppState>, body: web::Json<AuthRequest>) -> impl Responder {
-    let result = web::block(move || app_data.auth_service.login(body.into_inner())).await.unwrap();
-    match result {
-        Ok(data) => HttpResponse::Ok().json(data),
-        // Err(e) => HttpResponse::BadRequest().json(e.into())
-        Err(_) => HttpResponse::BadRequest().finish()
-    }
+pub async fn login(
+    state: web::Data<AppState>,
+    body: web::Json<AuthRequest>,
+) -> Result<HttpResponse, ApiError> {
+    let response = state.auth_service.login(body.into_inner()).await?;
+    Ok(with_token_cookie(response))
 }
 
 #[post("/api/auth/refresh")]
-pub async fn refresh(app_data: web::Data<crate::AppState>, body: web::Json<TokenRefreshRequest>) -> impl Responder {
-    let result = web::block(move || app_data.auth_service.refresh(&body.into_inner().refresh_token)).await.unwrap();
-    match result {
-        Ok(data) => HttpResponse::Ok().json(data),
-        // Err(e) => HttpResponse::BadRequest().json(e.into())
-        Err(_) => HttpResponse::BadRequest().finish()
-    }
+pub async fn refresh(
+    state: web::Data<AppState>,
+    body: web::Json<TokenRefreshRequest>,
+) -> Result<HttpResponse, ApiError> {
+    let response = state.auth_service.refresh(&body.refresh_token).await?;
+    Ok(with_token_cookie(response))
 }
 
-/**
-Checks the session user set by jwt_middleware and returns OK or BAD_REQUEST
- */
+/// 200 with the current user when the token (header or cookie) is valid, 401 otherwise.
 #[get("/api/auth/validate")]
-pub async fn validate(current_user: User) -> impl Responder {
-    match current_user.id {
-        Some(_) => HttpResponse::Ok().finish(),
-        None => HttpResponse::BadRequest().finish()
-    }
+pub async fn validate(current_user: CurrentUser) -> HttpResponse {
+    HttpResponse::Ok().json(current_user.0.view())
+}
+
+/// Browsers get the access token as an HttpOnly cookie, out of reach of page scripts;
+/// API clients use the same token from the JSON body as a Bearer header.
+fn with_token_cookie(response: AuthResponse) -> HttpResponse {
+    let cookie = Cookie::build(TOKEN_COOKIE, response.tokens.access_token.clone())
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .max_age(Duration::seconds(ACCESS_TOKEN_TTL as i64))
+        .finish();
+    HttpResponse::Ok().cookie(cookie).json(response)
 }

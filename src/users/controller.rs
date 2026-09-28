@@ -1,24 +1,30 @@
-use actix_web::{get, HttpResponse, post, Responder, web};
+use actix_web::{HttpResponse, get, post, web};
 
-use crate::users::models::CreateUser;
+use crate::AppState;
+use crate::errors::ApiError;
+use crate::security::CurrentUser;
+use crate::users::models::{CreateUser, Role};
 
 #[post("/api/user/create")]
-pub async fn create(app_data: web::Data<crate::AppState>, body: web::Json<CreateUser>) -> impl Responder {
-    let result = web::block(move || app_data.user_service.create(body.into_inner())).await;
-    match result {
-        Ok(result) => HttpResponse::Ok().json(result),
-        // Err(e) => HttpResponse::BadRequest().json::<GenericError>(e.into())
-        Err(_) => HttpResponse::BadRequest().finish()
-    }
+pub async fn create(
+    state: web::Data<AppState>,
+    body: web::Json<CreateUser>,
+) -> Result<HttpResponse, ApiError> {
+    let user = state.user_service.create(body.into_inner()).await?;
+    Ok(HttpResponse::Created().json(user.view()))
 }
 
+/// Users can look themselves up; admins can look up anyone.
 #[get("/api/user/{username}")]
-pub async fn get(app_data: web::Data<crate::AppState>, path: web::Path<String>) -> impl Responder {
+pub async fn get(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    current_user: CurrentUser,
+) -> Result<HttpResponse, ApiError> {
     let username = path.into_inner();
-    let result = web::block(move || app_data.user_service.get_by_username(&username)).await;
-    match result {
-        Ok(result) => HttpResponse::Ok().json(result),
-        // Err(e) => HttpResponse::BadRequest().json::<GenericError>(e.into())
-        Err(_) => HttpResponse::BadRequest().finish()
+    if current_user.0.username != username {
+        current_user.require(Role::Admin)?;
     }
+    let user = state.user_service.get_by_username(&username).await?;
+    Ok(HttpResponse::Ok().json(user.view()))
 }

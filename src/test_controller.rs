@@ -1,22 +1,25 @@
-use actix_web::{get, HttpResponse, Responder};
-use actix_web_grants::proc_macro::has_any_permission;
+use actix_web::{HttpResponse, get};
 use serde_json::json;
 
-use crate::users::models::User;
+use crate::errors::ApiError;
+use crate::security::CurrentUser;
+use crate::users::models::Role;
 
 #[get("/api/public")]
-pub async fn public(current_user: User) -> impl Responder {
-    HttpResponse::Ok().body(json!({ "username": &current_user.username, "endpoint_security": "PUBLIC" }).to_string())
+pub async fn public(current_user: Option<CurrentUser>) -> HttpResponse {
+    let username = current_user.map(|user| user.0.username);
+    HttpResponse::Ok().json(json!({ "username": username, "endpoint_security": "PUBLIC" }))
 }
 
 #[get("/api/protected/user")]
-#[has_any_permission("ROLE_USER", "ROLE_ADMIN")]
-pub async fn protected_user(current_user: User) -> impl Responder {
-    HttpResponse::Ok().body(json!({ "username": &current_user.username, "endpoint_security": "ANY ROLE" }).to_string())
+pub async fn protected_user(current_user: CurrentUser) -> HttpResponse {
+    HttpResponse::Ok()
+        .json(json!({ "username": current_user.0.username, "endpoint_security": "ANY ROLE" }))
 }
 
 #[get("/api/protected/admin")]
-#[has_any_permission("ROLE_ADMIN")]
-pub async fn protected_admin(current_user: User) -> impl Responder {
-    HttpResponse::Ok().body(json!({ "username": &current_user.username, "endpoint_security": "ROLE_ADMIN" }).to_string())
+pub async fn protected_admin(current_user: CurrentUser) -> Result<HttpResponse, ApiError> {
+    current_user.require(Role::Admin)?;
+    Ok(HttpResponse::Ok()
+        .json(json!({ "username": current_user.0.username, "endpoint_security": "ROLE_ADMIN" })))
 }

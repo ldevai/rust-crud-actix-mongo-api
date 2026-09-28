@@ -1,90 +1,89 @@
-use bson::{doc, Document, from_document};
-use chrono::Utc;
-use mongodb::sync::Collection;
+use mongodb::bson::oid::ObjectId;
+use mongodb::bson::{DateTime, doc};
+use mongodb::{Collection, Database};
 
-use crate::auth::models::{AuthRequest, AuthResponse};
-use crate::environment::Environment;
-use crate::errors::GenericError;
-use crate::security::{get_jwt_for_user, verify_password};
-use crate::users::models::{Tokens, User};
+use crate::auth::models::{AuthRequest, AuthResponse, Tokens};
+use crate::errors::ApiError;
+use crate::security::{Keys, TokenType, verify_password};
+use crate::users::models::User;
 
-#[derive(Clone)]
 pub struct AuthService {
-    collection: Collection<Document>,
+    users: Collection<User>,
+    keys: Keys,
 }
 
 impl AuthService {
-    pub fn new(env: Environment) -> AuthService {
-        let collection: Collection<Document> = env.db().collection("users");
-        AuthService { collection }
+    pub fn new(db: &Database, secret: &[u8]) -> Self {
+        Self {
+            users: db.collection("users"),
+            keys: Keys::new(secret),
+        }
     }
 
-    pub fn login(&self, request: AuthRequest) -> Result<AuthResponse, GenericError> {
-        // Find user by email
-        let filter = doc! {"email": &request.email };
-        let existing: User = match self.collection.find_one(filter, None).unwrap() {
-            Some(obj) => from_document(obj).unwrap(),
-            None => return Err(GenericError { message: "Not found" }),
-        };
+    pub async fn login(&self, request: AuthRequest) -> Result<AuthResponse, ApiError> {
+        let invalid = || ApiError::unauthorized("invalid email or password");
+        let email = request.email.trim().to_lowercase();
+        let user = self
+            .users
+            .find_one(doc! { "email": email })
+            .await?
+            .ok_or_else(invalid)?;
+        if !verify_password(request.password, user.password_hash.clone()).await? {
+            return Err(invalid());
+        }
 
-        // Validate passwords
-        match verify_password(&request.password, &existing.password) {
-            true => (),
-            false => return Err(GenericError { message: "Invalid credentials" }),
-        };
-
-        self.generate_tokens_and_update(existing)
+        let session_id = ObjectId::new().to_hex();
+        self.users
+            .update_one(doc! { "_id": user.id }, set_session(&session_id))
+            .await?;
+        self.tokens_for(user, &session_id)
     }
 
-    /**
-    Used by jwt_middleware to check if token has not been revoked
-     */
-    pub fn validate(&self, token: &str) -> Result<User, GenericError> {
-        // todo!("Get session from faster store such as redis");
-        let filter = doc! { "tokens.access_token": &token };
-        let user: User = match self.collection.find_one(filter, None).unwrap() {
-            Some(obj) => from_document(obj).unwrap(),
-            None => return Err(GenericError { message: "Not found" }),
-        };
-        Ok(user)
+    /// Trades a refresh token for a new token pair. The swap is atomic, so each
+    /// refresh token works exactly once.
+    pub async fn refresh(&self, refresh_token: &str) -> Result<AuthResponse, ApiError> {
+        let claims = self.keys.verify(refresh_token, TokenType::Refresh)?;
+        let user_id = parse_id(&claims.sub)?;
+        let session_id = ObjectId::new().to_hex();
+        let user = self
+            .users
+            .find_one_and_update(
+                doc! { "_id": user_id, "session_id": &claims.sid },
+                set_session(&session_id),
+            )
+            .await?
+            .ok_or_else(|| ApiError::unauthorized("refresh token already used or revoked"))?;
+        self.tokens_for(user, &session_id)
     }
 
-
-    /**
-    Generates new tokens if the given refresh_token is valid
-     */
-    pub fn refresh(&self, token: &str) -> Result<AuthResponse, GenericError> {
-        // todo!("Get session from faster store such as redis");
-        let filter = doc! { "tokens.refresh_token": &token };
-        let user: User = match self.collection.find_one(filter, None).unwrap() {
-            Some(obj) => from_document(obj).unwrap(),
-            None => return Err(GenericError { message: "Not found" }),
-        };
-        self.generate_tokens_and_update(user)
+    /// Resolves an access token to its user, rejecting tokens from a replaced session.
+    pub async fn authenticate(&self, access_token: &str) -> Result<User, ApiError> {
+        let claims = self.keys.verify(access_token, TokenType::Access)?;
+        let user_id = parse_id(&claims.sub)?;
+        self.users
+            .find_one(doc! { "_id": user_id, "session_id": &claims.sid })
+            .await?
+            .ok_or_else(|| ApiError::unauthorized("session expired, log in again"))
     }
 
-    pub fn generate_tokens_and_update(&self, mut user: User) -> Result<AuthResponse, GenericError> {
-        // Generate tokens and save them
-        let access_token = get_jwt_for_user(&user);
-        // todo!("Improve refresh token")
-        let refresh_token = get_jwt_for_user(&user);
-        user.tokens = Some(Tokens {
-            access_token: Some(access_token),
-            refresh_token: Some(refresh_token),
-        });
-        user.updated_at = Some(Utc::now());
-
-        let filter = doc! { "_id": user.id };
-        let updates = doc! { "$set": bson::to_document(&user).unwrap() };
-        self.collection.update_one(filter, updates, None).unwrap();
-
-        // Create response object
-        let result = AuthResponse {
-            email: user.email.to_string(),
-            username: user.username.to_string(),
+    fn tokens_for(&self, user: User, session_id: &str) -> Result<AuthResponse, ApiError> {
+        let user_id = user.id.to_hex();
+        Ok(AuthResponse {
+            tokens: Tokens {
+                access_token: self.keys.issue(&user_id, session_id, TokenType::Access)?,
+                refresh_token: self.keys.issue(&user_id, session_id, TokenType::Refresh)?,
+            },
+            email: user.email,
+            username: user.username,
             roles: user.roles,
-            tokens: user.tokens.unwrap(),
-        };
-        Ok(result)
+        })
     }
+}
+
+fn set_session(session_id: &str) -> mongodb::bson::Document {
+    doc! { "$set": { "session_id": session_id, "updated_at": DateTime::now() } }
+}
+
+fn parse_id(sub: &str) -> Result<ObjectId, ApiError> {
+    ObjectId::parse_str(sub).map_err(|_| ApiError::unauthorized("invalid or expired token"))
 }

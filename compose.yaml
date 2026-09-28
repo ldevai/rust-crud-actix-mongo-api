@@ -1,0 +1,23 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      MONGO_URL: mongodb://db:27017
+      MONGO_DB: demo
+      AUTH_SECRET: change-me-in-production
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mongo:8
+    volumes:
+      - ./data/mongo:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

@@ -1,55 +1,67 @@
-use bson::{Document, from_document, to_document};
-use chrono::Utc;
-use mongodb::{error::Error, results::InsertOneResult, sync::Collection};
+use mongodb::bson::oid::ObjectId;
+use mongodb::bson::{DateTime, doc};
+use mongodb::options::IndexOptions;
+use mongodb::{Collection, Database, IndexModel};
 
-use crate::environment::Environment;
-use crate::errors::GenericError;
-use crate::security::get_hashed_password;
-use crate::users::models::{CreateUser, User, UserView};
+use crate::errors::{ApiError, is_duplicate_key};
+use crate::security::hash_password;
+use crate::users::models::{CreateUser, Role, User};
 
-#[derive(Clone)]
 pub struct UserService {
-    collection: Collection<Document>,
+    users: Collection<User>,
 }
 
 impl UserService {
-    pub fn new(env: Environment) -> UserService {
-        let collection: Collection<Document> = env.db().collection("users");
-        UserService { collection }
+    pub fn new(db: &Database) -> Self {
+        Self {
+            users: db.collection("users"),
+        }
     }
 
-    pub fn create(&self, request: CreateUser) -> Result<InsertOneResult, GenericError> {
-        let filter = bson::doc! {"username": &request.username };
-        // let filter = bson::doc! {"$or": [{"email": &request.email }, {"username": &request.username }]};
-        match self.collection.find_one(filter, None).unwrap() {
-            Some(_) => return Err(GenericError { message: "User already exists" }),
-            None => (),
+    /// Unique indexes make duplicate emails/usernames impossible, even under
+    /// concurrent sign-ups. Creating an existing index is a no-op.
+    pub async fn ensure_indexes(&self) -> mongodb::error::Result<()> {
+        for field in ["email", "username"] {
+            let index = IndexModel::builder()
+                .keys(doc! { field: 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build();
+            self.users.create_index(index).await?;
         }
+        Ok(())
+    }
 
+    /// Self-registration always creates a plain `User`; promoting someone to
+    /// `Admin` is an operator action on the database (see README).
+    pub async fn create(&self, mut request: CreateUser) -> Result<User, ApiError> {
+        request.email = request.email.trim().to_lowercase();
+        request.username = request.username.trim().to_string();
+        request.validate()?;
+
+        let now = DateTime::now();
         let user = User {
-            id: None,
+            id: ObjectId::new(),
             email: request.email,
             username: request.username,
-            password: get_hashed_password(&request.password),
-            roles: request.roles,
-            tokens: None,
-            created_at: Some(Utc::now()),
-            updated_at: None,
+            password_hash: hash_password(request.password).await?,
+            roles: vec![Role::User],
+            session_id: None,
+            created_at: now,
+            updated_at: now,
         };
-
-        let mut doc: Document = to_document(&user).unwrap();
-        doc.remove("_id"); // Remove None field that would be saved instead of auto-generated
-
-        let result: Result<InsertOneResult, Error> = self.collection.insert_one(doc, None);
-        Ok(result.unwrap())
+        match self.users.insert_one(&user).await {
+            Ok(_) => Ok(user),
+            Err(err) if is_duplicate_key(&err) => {
+                Err(ApiError::conflict("email or username already taken"))
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
-    pub fn get_by_username(&self, username: &str) -> Result<UserView, GenericError> {
-        let filter = bson::doc! {"username": username};
-        let result: Result<Option<Document>, mongodb::error::Error> = self.collection.find_one(filter, None);
-        match result.unwrap() {
-            Some(doc) => Ok(from_document(doc).unwrap()),
-            None => Err(GenericError { message: "Not found" }),
-        }
+    pub async fn get_by_username(&self, username: &str) -> Result<User, ApiError> {
+        self.users
+            .find_one(doc! { "username": username })
+            .await?
+            .ok_or_else(|| ApiError::not_found("user not found"))
     }
 }
